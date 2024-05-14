@@ -1,13 +1,11 @@
-from django.contrib.auth.models import AbstractUser
 from django.db import models
-
-# Create your models here.
-
-class User(AbstractUser):
-    balance = models.FloatField(default=0)
+from django.contrib.auth.models import User
 
 class Coin(models.Model):
-    user = models.ForeignKey("User", on_delete=models.CASCADE, related_name="usercoin")
-    coinid = models.CharField(max_length=25)
-    buyprice = models.FloatField(default=0)
-    quantity = models.FloatField(default=0)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    name = models.CharField(max_length=100)
+    quantity = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    def __str__(self):
+        return f"{self.name} - {self.quantity}"

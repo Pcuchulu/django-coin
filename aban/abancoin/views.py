@@ -1,196 +1,136 @@
-import json
-from django.db import IntegrityError
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
-from django.contrib.auth.decorators import login_required
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth import authenticate, login, logout
-from django.urls import reverse
-import requests
-from django.shortcuts import render
+from django.contrib.auth.models import User
+from django.db import IntegrityError
+from .models import Coin
+from .serializers import CoinSerializer
+from django.db import transaction
 
-from abancoin.models import User, Coin
-
-# Create your views here.
-
-
+@api_view(['POST'])
 def login_view(request):
     if request.method == "POST":
-
-        
-        username = request.POST["username"]
-        password = request.POST["password"]
+        username = request.data.get("username", "")
+        password = request.data.get("password", "")
         user = authenticate(request, username=username, password=password)
 
-        
         if user is not None:
             login(request, user)
-            return HttpResponseRedirect(reverse("index"))
+            return Response({"message": "Login successful"})
         else:
-            return render(request, "abancoin/login.html", {
-                "message": "Invalid username and/or password."
-            })
-    else:
-        return render(request, "abancoin/login.html")
+            return Response({"message": "Invalid username and/or password"}, status=400)
 
+@api_view(['POST'])
 def logout_view(request):
     logout(request)
-    return HttpResponseRedirect(reverse("index"))
+    return Response({"message": "Logout successful"})
 
+@api_view(['POST'])
 def register(request):
     if request.method == "POST":
-        username = request.POST["username"]
-        email = request.POST["email"]
+        username = request.data.get("username", "")
+        email = request.data.get("email", "")
+        password = request.data.get("password", "")
+        confirmation = request.data.get("confirmation", "")
 
-        
-        password = request.POST["password"]
-        confirmation = request.POST["confirmation"]
         if password != confirmation:
-            return render(request, "abancoin/register.html", {
-                "message": "Passwords must match."
-            })
+            return Response({"message": "Passwords must match"}, status=400)
 
-        
         try:
             user = User.objects.create_user(username, email, password)
             user.save()
+            login(request, user)
+            return Response({"message": "Registration successful"})
         except IntegrityError:
-            return render(request, "abancoin/register.html", {
-                "message": "Username already taken."
-            })
-        login(request, user)
-        return HttpResponseRedirect(reverse("screener"))
-    else:
-        return render(request, "abancoin/register.html")
+            return Response({"message": "Username already taken"}, status=400)
 
-def logout_view(request):
-    logout(request)
-    return HttpResponseRedirect(reverse("screener"))
-
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def dashboard(request):
-    return render(request, "abancoin/dashboard.html")
+    return Response({"message": "Dashboard data goes here"})
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def screener(request):
-    if request.user.is_authenticated:
-        holdings = Coin.objects.filter(user=request.user)
-        userdata = User.objects.get(id=request.user.id)
-        abancoin_price = 4.0
-        abancoin_quantity = 0  
-        return render(request, "abancoin/dashboard.html", {
-            'abancoin_price': abancoin_price,
-            'abancoin_quantity': abancoin_quantity,
-            'userdata': userdata,
-            'holdings': holdings
-        })
-    else:
-        # Redirect to login page if user is not authenticated
-        return HttpResponseRedirect(reverse("login"))
+    holdings = Coin.objects.filter(user=request.user)
+    userdata = request.user
+    abancoin_price = 4.0
+    abancoin_quantity = 0
+    serializer = CoinSerializer(holdings, many=True)
+    return Response({
+        'abancoin_price': abancoin_price,
+        'abancoin_quantity': abancoin_quantity,
+        'userdata': userdata,
+        'holdings': serializer.data
+    })
 
-
-@login_required
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def buy(request):
     if request.method == "POST":
-        
-        coin_name = request.POST.get("coin_name", "")  
-        quantity = float(request.POST.get("quantity", 0))  
+        coin_name = request.data.get("coin_name", "")
+        quantity = float(request.data.get("quantity", 0))
 
-        
         coin_prices = {
-            "abancoin": 4.0,    
+            "abancoin": 4.0,
+            # Add other coin prices here
         }
 
-        
         if coin_name in coin_prices and quantity > 0:
             price = coin_prices[coin_name]
             total_cost = price * quantity
 
-            
-            if total_cost < 10:
-                aggregated_orders = request.session.get("aggregated_orders", [])
-                if aggregated_orders and aggregated_orders[0]["coin_name"] == coin_name:
-                    aggregated_orders[0]["quantity"] += quantity
-                    aggregated_orders[0]["total_cost"] += total_cost
-                else:
-                    aggregated_order = {
-                        "coin_name": coin_name,
-                        "quantity": quantity,
-                        "total_cost": total_cost
-                    }
-                    aggregated_orders.insert(0, aggregated_order)
-                request.session["aggregated_orders"] = aggregated_orders
-                return render(request, "VSCrypto/dashboard.html", {
-                    'message': f"Order for {coin_name} has been added to aggregation",
-                })
-            else:
+            with transaction.atomic():
+                try:
+                    user = request.user
+                    cur_balance = user.balance
+                    if total_cost <= cur_balance:
+                        # Deduct the total cost from user's balance
+                        cur_balance -= total_cost
+                        user.balance = cur_balance
+                        user.save()
 
-                curbalance = User.objects.get(username=request.user.username).balance
-                if total_cost <= curbalance:
-                    
-                    curbalance -= total_cost
-                    User.objects.filter(username=request.user.username).update(balance=curbalance)
+                        # Perform other operations such as creating the coin object
+                        Coin.objects.create(user=user, name=coin_name, quantity=quantity, price=price)
 
-                    
-                    buy_from_exchange(coin_name, quantity)
-
-                    
-                    print("TRANSACTION COMPLETE")
-                    userdata = User.objects.get(id=request.user.id)
-                    holdings = Coin.objects.filter(user=request.user)
-                    return render(request, "VSCrypto/dashboard.html", {
-                        'message': "Transaction Complete",
-                        'userdata': userdata,
-                        'holdings': holdings
-                    })
-                else:
-                    print("NOT ENOUGH BALANCE")
-                    userdata = User.objects.get(id=request.user.id)
-                    holdings = Coin.objects.filter(user=request.user)
-                    return render(request, "VSCrypto/dashboard.html", {
-                        'message': "Transaction Failed: Not enough balance",
-                        'userdata': userdata,
-                        'holdings': holdings
-                    })
+                        # Return success response
+                        return Response({"message": "Transaction successful"})
+                    else:
+                        return Response({"message": "Not enough balance"}, status=400)
+                except Exception as e:
+                    # Rollback the transaction if an exception occurs
+                    return Response({"message": f"Transaction failed: {str(e)}"}, status=400)
         else:
-            print("INVALID COIN NAME OR QUANTITY")
-            userdata = User.objects.get(id=request.user.id)
-            holdings = Coin.objects.filter(user=request.user)
-            return render(request, "VSCrypto/dashboard.html", {
-                'message': "Invalid coin name or quantity",
-                'userdata': userdata,
-                'holdings': holdings
-            })
-    else:
-        pass
+            return Response({"message": "Invalid coin name or quantity"}, status=400)
 
-
-@login_required
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def cash(request):
-    userdata = User.objects.get(id=request.user.id)
-    return render(request, "abancoin/cash.html",{
-        'nums':list(range(0, 14)),
-        'userdata':userdata,
-    })
+    userdata = request.user
+    return Response({"message": "Cash endpoint"})
 
-@login_required
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def holdings(request):
-    holdings = Coin.objects.filter(user = request.user)
-    return render(request, "abancoin/holdings.html",{
-        'nums':list(range(0, 14)),
-        'holdings':holdings
-    })
+    holdings = Coin.objects.filter(user=request.user)
+    serializer = CoinSerializer(holdings, many=True)
+    return Response({"message": "Holdings endpoint", "holdings": serializer.data})
 
-@login_required
-def sell(request ,id , price ,qty):
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def sell(request):
+    # Implement the sell logic here
+    return Response({"message": "Sell endpoint"})
 
-
-
-@login_required
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def deposit(request):
+    # Implement the deposit logic here
+    return Response({"message": "Deposit endpoint"})
 
-@login_required
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def withdraw(request):
-
-@login_required
-def buy_from_exchange(coin_name, quantity):
-    pass
-
-
-    
+    # Implement the withdraw logic here
+    return Response({"message": "Withdraw endpoint"})
